@@ -2,18 +2,17 @@ import cv2
 import numpy as np
 import os
 import csv
+import gc
+from pathlib import Path
 from ultralytics import YOLO
 
 # ==========================================
 # SETTINGS
 # ==========================================
-from pathlib import Path
-
 BASE_DIR = Path(__file__).resolve().parent
 
 ROW_MODEL_PATH = BASE_DIR / "sheet_model" / "best.pt"
 BUBBLE_MODEL_PATH = BASE_DIR / "bubble_model" / "best.pt"
-DEBUG_FOLDER = r"C:\Users\user\Desktop\Testing\debug_answers6.0"
 
 # Bubble model class ids
 FILLED_CLASS_ID = 0
@@ -27,7 +26,7 @@ ROW_CONF = 0.25
 
 # Bubble model settings
 BUBBLE_CONF = 0.06
-BUBBLE_IMGSZ = 1440
+BUBBLE_IMGSZ = 640
 
 
 # ==========================================
@@ -195,99 +194,160 @@ def detect_answer_from_row_image(model, row_img, debug_folder=None, row_index=No
 
 
 # ==========================================
-# MAIN PIPELINE FUNCTION FOR API
+# STEP 1: DETECT AND EXTRACT ROWS
 # ==========================================
-def process_omr_image_file(
-    image_path,
-    row_model,
-    bubble_model,
-    output_csv=None,
-    debug_folder=None,
-    save_debug=False
-):
+def detect_and_extract_rows(image_path, row_model_path):
     img = cv2.imread(image_path)
     if img is None:
         raise FileNotFoundError(f"Image not found: {image_path}")
 
-    results = row_model.predict(image_path, conf=ROW_CONF, verbose=False)
+    print("Loading row model...")
+    row_model = YOLO(str(row_model_path))
 
-    boxes = []
+    try:
+        results = row_model.predict(image_path, conf=ROW_CONF, verbose=False)
 
-    for r in results:
-        if r.boxes is None or len(r.boxes) == 0:
-            continue
+        boxes = []
 
-        xyxy = r.boxes.xyxy.cpu().numpy()
-        cls = r.boxes.cls.cpu().numpy()
-
-        for box, c in zip(xyxy, cls):
-            class_name = row_model.names[int(c)]
-
-            if str(class_name).lower() != "row":
+        for r in results:
+            if r.boxes is None or len(r.boxes) == 0:
                 continue
 
-            x1, y1, x2, y2 = map(int, box)
-            cx = (x1 + x2) / 2.0
-            cy = (y1 + y2) / 2.0
+            xyxy = r.boxes.xyxy.cpu().numpy()
+            cls = r.boxes.cls.cpu().numpy()
 
-            boxes.append({
-                "x1": x1,
-                "y1": y1,
-                "x2": x2,
-                "y2": y2,
-                "cx": cx,
-                "cy": cy
-            })
+            for box, c in zip(xyxy, cls):
+                class_name = row_model.names[int(c)]
 
-    if len(boxes) == 0:
-        raise RuntimeError("No row detections found.")
+                if str(class_name).lower() != "row":
+                    continue
 
-    boxes = sorted(boxes, key=lambda b: b["cx"])
+                x1, y1, x2, y2 = map(int, box)
+                cx = (x1 + x2) / 2.0
+                cy = (y1 + y2) / 2.0
 
-    n_cols = 4
-    columns = np.array_split(boxes, n_cols)
-    columns = [list(col) for col in columns]
-    columns = sorted(columns, key=lambda col: np.mean([b["cx"] for b in col]) if len(col) > 0 else 0)
+                boxes.append({
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                    "cx": cx,
+                    "cy": cy
+                })
 
-    ordered_boxes = []
-    for col in columns:
-        col_sorted = sorted(col, key=lambda b: b["cy"])
-        ordered_boxes.extend(col_sorted)
+        if len(boxes) == 0:
+            raise RuntimeError("No row detections found.")
 
-    all_results = []
+        boxes = sorted(boxes, key=lambda b: b["cx"])
 
-    for idx, b in enumerate(ordered_boxes, start=1):
-        x1, y1, x2, y2 = b["x1"], b["y1"], b["x2"], b["y2"]
-
-        x1 = max(0, x1)
-        y1 = max(0, y1)
-        x2 = min(img.shape[1], x2)
-        y2 = min(img.shape[0], y2)
-
-        row_crop = img[y1:y2, x1:x2]
-
-        answer = detect_answer_from_row_image(
-            bubble_model,
-            row_crop,
-            debug_folder=debug_folder,
-            row_index=idx,
-            save_debug=save_debug
+        n_cols = 4
+        columns = np.array_split(boxes, n_cols)
+        columns = [list(col) for col in columns]
+        columns = sorted(
+            columns,
+            key=lambda col: np.mean([b["cx"] for b in col]) if len(col) > 0 else 0
         )
 
-        all_results.append({
-            "question": idx,
-            "answer": answer
-        })
+        ordered_boxes = []
+        for col in columns:
+            col_sorted = sorted(col, key=lambda b: b["cy"])
+            ordered_boxes.extend(col_sorted)
 
-    if output_csv:
-        with open(output_csv, mode="w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(["Question", "Answer"])
-            for row in all_results:
-                writer.writerow([row["question"], row["answer"]])
+        row_crops = []
 
-    return {
-        "total_rows_detected": len(ordered_boxes),
-        "results": all_results,
-        "csv_path": output_csv
-    }
+        for idx, b in enumerate(ordered_boxes, start=1):
+            x1, y1, x2, y2 = b["x1"], b["y1"], b["x2"], b["y2"]
+
+            x1 = max(0, x1)
+            y1 = max(0, y1)
+            x2 = min(img.shape[1], x2)
+            y2 = min(img.shape[0], y2)
+
+            row_crop = img[y1:y2, x1:x2].copy()
+
+            row_crops.append({
+                "question": idx,
+                "row_crop": row_crop
+            })
+
+        return row_crops
+
+    finally:
+        print("Releasing row model...")
+        del row_model
+        gc.collect()
+
+
+# ==========================================
+# STEP 2: DETECT ANSWERS FROM ROWS
+# ==========================================
+def detect_answers_from_rows(row_crops, bubble_model_path, output_csv=None, debug_folder=None, save_debug=False):
+    print("Loading bubble model...")
+    bubble_model = YOLO(str(bubble_model_path))
+
+    try:
+        all_results = []
+
+        for item in row_crops:
+            idx = item["question"]
+            row_crop = item["row_crop"]
+
+            answer = detect_answer_from_row_image(
+                bubble_model,
+                row_crop,
+                debug_folder=debug_folder,
+                row_index=idx,
+                save_debug=save_debug
+            )
+
+            all_results.append({
+                "question": idx,
+                "answer": answer
+            })
+
+        if output_csv:
+            with open(output_csv, mode="w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["Question", "Answer"])
+                for row in all_results:
+                    writer.writerow([row["question"], row["answer"]])
+
+        return {
+            "total_rows_detected": len(row_crops),
+            "results": all_results,
+            "csv_path": output_csv
+        }
+
+    finally:
+        print("Releasing bubble model...")
+        del bubble_model
+        gc.collect()
+
+
+# ==========================================
+# MAIN PIPELINE FUNCTION FOR API
+# ==========================================
+def process_omr_image_file(
+    image_path,
+    output_csv=None,
+    debug_folder=None,
+    save_debug=False,
+    row_model_path=ROW_MODEL_PATH,
+    bubble_model_path=BUBBLE_MODEL_PATH
+):
+    # Step 1: load row model only
+    row_crops = detect_and_extract_rows(
+        image_path=image_path,
+        row_model_path=row_model_path
+    )
+
+    # Step 2: load bubble model only after row model is released
+    result = detect_answers_from_rows(
+        row_crops=row_crops,
+        bubble_model_path=bubble_model_path,
+        output_csv=output_csv,
+        debug_folder=debug_folder,
+        save_debug=save_debug
+    )
+
+    return result
