@@ -9,6 +9,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from omr_pipeline import process_omr_image_file, ensure_folder
 
+
+import torch
+import ultralytics
+
+print("TORCH VERSION:", torch.__version__)
+print("ULTRALYTICS VERSION:", ultralytics.__version__)
 # ==========================================
 # SETTINGS
 # ==========================================

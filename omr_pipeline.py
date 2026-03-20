@@ -4,7 +4,23 @@ import os
 import csv
 import gc
 from pathlib import Path
+
+import torch
 from ultralytics import YOLO
+
+# Add safe globals only if this torch version supports it
+try:
+    from ultralytics.nn.tasks import DetectionModel
+
+    if hasattr(torch.serialization, "add_safe_globals"):
+        torch.serialization.add_safe_globals([DetectionModel])
+        print("Applied torch safe globals patch for DetectionModel")
+    else:
+        print("torch.serialization.add_safe_globals not available in this torch version")
+except Exception as e:
+    print(f"Safe globals patch skipped: {e}")
+
+
 
 # ==========================================
 # SETTINGS
